@@ -36,6 +36,25 @@ list(bike_rides.columns)
 bike_rides.loc[bike_rides['tripduration'] < 10,'group_duration'] = "LOW"
 bike_rides.loc[bike_rides['tripduration'] > 10,'group_duration'] = "HIGH"
 bike_rides.head()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import StandardScaler
@@ -100,6 +119,19 @@ print(feature_columns)
 
 df_train[feature_columns].head()
 df_train["group_duration"].head()
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -305,8 +337,6 @@ model = Model(inputs=all_inputs, outputs=final_branch)
 
 
 
-
-
 from IPython.display import SVG
 from keras.utils.vis_utils import model_to_dot
 
@@ -363,23 +393,136 @@ from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_sc
 from sklearn.model_selection import StratifiedKFold
 
 
+new_df = pd.concat([df_train,df_test], axis=0)
 
-#select cross validation
-cv = StratifiedKFold(n_splits=10)
-# select evaluation criteria
-my_scorer = make_scorer(recall_score, average="macro")
-# run model training and cross validation
-per_fold_eval_criteria = cross_val_score(estimator=model, X = X_ints_train+ X_train_num, y = y_train, cv=cv, scoring=my_scorer)
+new_df.dropna(inplace=True)
+new_df.reset_index(inplace=True)
 
-plt.bar(range(len(per_fold_eval_criteria)),per_fold_eval_criteria)
-plt.ylim([min(per_fold_eval_criteria)-0.01,max(per_fold_eval_criteria)])
-plt.show()
+X = new_df.drop(columns=["group_duration"])
+Y = new_df["group_duration"]
+
+seed=7
+kfold = StratifiedKFold(n_splits=10, shuffle=True, random_state=seed)
+cvscores = []
+for train, test in kfold.split(X, Y):
+    # create model
+    # Fit the model
+    X_ints_train = []
+    X_ints_test = []
+    all_inputs = []
+    all_wide_branch_outputs = []
+    embed_branches = []
+    train_df = new_df.iloc[train,:]
+    test_df = new_df.iloc[test,:]
+    y_train = train_df['group_duration'].values.astype(np.int)
+    y_test = test_df['group_duration'].values.astype(np.int)
+    X_train_num =  train_df[numeric_headers].values
+    X_test_num = test_df[numeric_headers].values
+
+
+    for cols in cross_columns:
+        # encode crossed columns as ints for the embedding
+        enc = LabelEncoder()
+
+        # create crossed labels
+        X_crossed_train = train_df[cols].apply(lambda x: '_'.join(x), axis=1)
+        X_crossed_test = test_df[cols].apply(lambda x: '_'.join(x), axis=1)
+
+        enc.fit(np.hstack((X_crossed_train.values,  X_crossed_test.values)))
+        X_crossed_train = enc.transform(X_crossed_train)
+        X_crossed_test = enc.transform(X_crossed_test)
+        X_ints_train.append( X_crossed_train )
+        X_ints_test.append( X_crossed_test )
+
+        # get the number of categories
+        N = max(X_ints_train[-1]+1) # same as the max(df_train[col])
+
+        # create embedding branch from the number of categories
+        inputs = Input(shape=(1,),dtype='int32', name = '_'.join(cols))
+        all_inputs.append(inputs)
+        x = Embedding(input_dim=N,
+                      output_dim=int(np.sqrt(N)),
+                      input_length=1, name = '_'.join(cols)+'_embed')(inputs)
+        x = Flatten()(x)
+        all_wide_branch_outputs.append(x)
+
+    # merge the branches together
+    wide_branch = concatenate(all_wide_branch_outputs, name='wide_concat')
+    wide_branch = Dense(units=1,activation='sigmoid',name='wide_combined')(wide_branch)
+
+    # reset this input branch
+    all_deep_branch_outputs = []
+    # add in the embeddings
+    for col in categorical_headers_ints:
+        # encode as ints for the embedding
+        X_ints_train.append( train_df[col].values )
+        X_ints_test.append( test_df[col].values )
+
+        # get the number of categories
+        N = max(X_ints_train[-1]+1) # same as the max(df_train[col])
+
+        # create embedding branch from the number of categories
+        inputs = Input(shape=(1,),dtype='int32', name=col)
+        all_inputs.append(inputs)
+        x = Embedding(input_dim=N,
+                      output_dim=int(np.sqrt(N)),
+                      input_length=1, name=col+'_embed')(inputs)
+        x = Flatten()(x)
+        all_deep_branch_outputs.append(x)
+
+    # also get a dense branch of the numeric features
+    all_inputs.append(Input(shape=(X_train_num.shape[1],),
+                sparse=False,
+                name='numeric_data'))
+
+    x = Dense(units=20, activation='relu',name='numeric_1')(all_inputs[-1])
+    all_deep_branch_outputs.append( x )
+
+    # merge the deep branches together
+    deep_branch = concatenate(all_deep_branch_outputs,name='concat_embeds')
+    deep_branch = Dense(units=50,kernel_regularizer=regularizers.l2(0.01), activation='relu', name='deep1')(deep_branch)
+    deep_branch = Dropout(0.5)(deep_branch)
+    deep_branch = Dense(units=25,kernel_regularizer=regularizers.l2(0.01), activation='relu', name='deep2')(deep_branch)
+    deep_branch = Dropout(0.5)(deep_branch)
+    deep_branch = Dense(units=10,kernel_regularizer=regularizers.l2(0.01), activation='relu', name='deep3')(deep_branch)
+    deep_branch = Dropout(0.5)(deep_branch)
+
+    final_branch = concatenate([wide_branch, deep_branch],name='concat_deep_wide')
+    final_branch = Dense(units=1,activation='sigmoid',name='combined')(final_branch)
+
+    model = Model(inputs=all_inputs, outputs=final_branch)
 
 
 
-param_grid = dict(epochs=[10,20,30])
-grid = GridSearchCV(estimator=model, param_grid=param_grid, n_jobs=-1)
-grid_result = grid.fit(X, Y)
+
+
+
+    from IPython.display import SVG
+    from keras.utils.vis_utils import model_to_dot
+
+    # you will need to install pydot properly on your machine to get this running
+    SVG(model_to_dot(model).create(prog='dot', format='svg'))
+
+
+    model.compile(optimizer='adagrad',
+                  loss='binary_crossentropy',
+                  metrics=['accuracy'])
+
+    # lets also add the history variable to see how we are doing
+    # and lets add a validation set to keep track of our progress
+    history = model.fit(X_ints_train+ [X_train_num],
+                        y_train,
+                        epochs=10,
+                        batch_size=32,
+                        verbose=1,
+                        validation_data = (X_ints_test + [X_test_num], y_test))
+
+    yhat = np.round(model.predict(X_ints_test + [X_test_num]))
+
+
+    cvscores.append(mt.accuracy_score(y_test,yhat))
+
+print("%.2f%% (+/- %.2f%%)" % (np.mean(cvscores), np.std(cvscores)))
 
 
 
